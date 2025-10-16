@@ -411,21 +411,293 @@ mysql> SHOW TABLES;
 mysql> EXIT;
 ```
 
-### 4.3 Backend 애플리케이션 배포
+### 4.3 Backend (MSGLOG API) 애플리케이션 배포
 
-> **참고**: Backend 배포 절차는 별도 문서 참조
+#### 4.3.1 서비스 접미사 결정
 
-**일반적인 배포 흐름**
-1. Backend 코드 서버에 업로드 (Git clone 또는 SFTP)
-2. `.env` 파일 설정 (DB 연결 정보 등)
-3. Docker 이미지 빌드
-4. Docker Stack 배포
+MSGLOG는 **서비스 접미사**를 사용하여 동일 서버에서 여러 환경을 동시에 운영할 수 있습니다.
 
-### 4.4 Frontend 애플리케이션 배포
+**일반적인 접미사 예시**
+
+| 환경 | 접미사 | Stack 이름 | 용도 |
+|-----|-------|-----------|------|
+| 운영 | `prod` | `kim5257_msg_log_prod` | 프로덕션 환경 |
+| 개발 | `dev` | `kim5257_msg_log_dev` | 개발 테스트 |
+| 스테이징 | `staging` | `kim5257_msg_log_staging` | 배포 전 검증 |
+| 테스트 | `test` | `kim5257_msg_log_test` | QA 테스트 |
+
+> **참고**: 이 매뉴얼에서는 운영 환경(`prod`)을 예시로 사용합니다.
+
+#### 4.3.2 데이터 디렉토리 초기화
+
+```bash
+# MSGLOG 프로젝트 디렉토리로 이동
+cd /path/to/msglog
+
+# 데이터 디렉토리 초기화 (서비스 접미사 필수)
+bash init_data.sh prod
+```
+
+**init_data.sh 실행 내용**
+- 서비스별 데이터 디렉토리 생성
+- 설정 파일 디렉토리 생성
+- 로그 디렉토리 생성
+
+**생성되는 디렉토리 (prod 예시)**
+```
+/home/$USER/nfs/
+├── kim5257-msg-log-prod-nginx/
+│   └── htdocs/              # Frontend 정적 파일
+├── kim5257-msg-log-prod-api/
+│   ├── config/              # API 설정 파일
+│   └── logs/                # API 로그
+└── kim5257-msg-log-prod-db/
+    └── uploads/             # 업로드 파일
+```
+
+#### 4.3.3 설정 파일 구성
+
+```bash
+# config.json 파일 생성
+cp config.json.template /home/$USER/nfs/kim5257-msg-log-prod-api/config/config.json
+
+# 설정 파일 편집
+nano /home/$USER/nfs/kim5257-msg-log-prod-api/config/config.json
+```
+
+**config.json 설정 예시**
+```json
+{
+  "port": 4000,
+  "db": {
+    "host": "mariadb",
+    "port": 3306,
+    "database": "msglog_prod",
+    "user": "msglog_user",
+    "password": "your_secure_password"
+  },
+  "redis": {
+    "host": "redis",
+    "port": 6379
+  },
+  "jwt": {
+    "secret": "your_jwt_secret_key",
+    "expiresIn": "7d"
+  }
+}
+```
+
+#### 4.3.4 Backend 프로젝트 준비
+
+```bash
+# MSGLOG 프로젝트 디렉토리로 이동
+cd /path/to/msglog
+
+# Git으로 최신 코드 받기 (또는 SFTP로 업로드)
+git pull origin main
+```
+
+#### 4.3.5 Docker 이미지 빌드
+
+```bash
+# API 디렉토리로 이동
+cd api
+
+# 빌드 스크립트 실행
+bash build.sh
+```
+
+**build.sh 실행 내용**
+- Dockerfile을 사용하여 Docker 이미지 빌드
+- 이미지 태그 생성 (latest, 버전별)
+- TypeScript 컴파일
+- PM2 설정 및 로그 로테이션 구성
+
+**빌드 확인**
+```bash
+# 빌드된 이미지 확인
+docker images | grep msglog
+
+# 예상 출력:
+# kim5257app/kim5257-msg-log-api    latest    abc123def456    2 minutes ago    500MB
+```
+
+#### 4.3.6 Backend Stack 배포
+
+```bash
+# 프로젝트 루트로 이동
+cd /path/to/msglog
+
+# deploy.sh 실행 (서비스 접미사 필수)
+bash deploy.sh prod
+```
+
+**deploy.sh 스크립트 분석**
+```bash
+#!/bin/bash
+# 사용법: bash deploy.sh <서비스접미사>
+
+# 1. 파라미터 검증
+if [ $# -ne 1 ] ; then
+    echo "서비스 접미사를 넣어야 합니다."
+    exit -1;
+fi
+
+# 2. docker-compose.yml 생성
+# - $USER를 현재 사용자명으로 치환
+# - $suffix를 입력받은 접미사로 치환
+sed "s/\$USER/$USER/g" docker-compose.yml.template | \
+sed "s/\$suffix/$1/g" > docker-compose.yml
+
+# 3. Docker Stack 배포
+docker stack deploy --with-registry-auth \
+  --compose-file docker-compose.yml \
+  kim5257_msg_log_$1
+```
+
+**실행 과정**
+1. `docker-compose.yml.template`에서 환경변수 치환
+2. `docker-compose.yml` 생성
+3. Docker Stack 배포 또는 업데이트
+4. Private Registry 인증 정보 전달
+
+**배포 확인**
+```bash
+# Stack 확인
+docker stack ls
+
+# 예상 출력:
+# NAME                    SERVICES
+# kim5257_msg_log_prod    2
+
+# 서비스 확인
+docker stack services kim5257_msg_log_prod
+
+# 서비스 상세 정보
+docker service ps kim5257_msg_log_prod_api
+
+# 로그 확인
+docker service logs -f kim5257_msg_log_prod_api
+```
+
+#### 4.3.7 API 서버 동작 확인
+
+```bash
+# 헬스체크 엔드포인트 테스트
+curl http://localhost:4000/health
+
+# 예상 응답:
+# {"status":"ok","timestamp":"2024-01-01T00:00:00.000Z"}
+
+# API 엔드포인트 테스트
+curl http://localhost:4000/api/status
+
+# Nginx를 통한 외부 접근 테스트
+curl https://api.example.com/health
+```
+
+---
+
+## 4.4 Backend API 서비스 업데이트
+
+### 4.4.1 일반적인 업데이트 절차
+
+```bash
+# 1. 최신 코드 받기
+cd /path/to/msglog
+git pull origin main
+
+# 2. Docker 이미지 재빌드
+cd api
+bash build.sh
+
+# 3. 서비스 업데이트 (서비스 접미사 지정)
+cd ..
+bash deploy.sh prod
+```
+
+**deploy.sh는 자동으로 다음을 처리합니다:**
+- 기존 서비스 확인
+- Rolling Update 방식으로 무중단 배포
+- 배포 진행 상황 모니터링
+
+### 4.4.2 수동 서비스 업데이트 (필요시)
+
+```bash
+# 특정 이미지로 서비스 업데이트
+docker service update --image kim5257app/kim5257-msg-log-api:latest \
+  kim5257_msg_log_prod_api
+
+# 환경변수 추가/변경
+docker service update \
+  --env-add NEW_FEATURE_FLAG=true \
+  kim5257_msg_log_prod_api
+
+# 리소스 제한 변경
+docker service update \
+  --limit-cpu 2.0 \
+  --limit-memory 1024M \
+  kim5257_msg_log_prod_api
+
+# 서비스 스케일링
+docker service scale kim5257_msg_log_prod_api=3
+```
+
+### 4.4.3 롤백 (이전 버전으로 복원)
+
+```bash
+# 이전 버전으로 자동 롤백
+docker service rollback kim5257_msg_log_prod_api
+
+# 롤백 진행 상황 확인
+docker service ps kim5257_msg_log_prod_api
+```
+
+### 4.4.4 완전 재배포
+
+```bash
+# Stack 제거 후 재배포
+cd /path/to/msglog
+
+# 1. 기존 Stack 제거 (서비스 접미사 지정)
+docker stack rm kim5257_msg_log_prod
+
+# 2. 서비스가 완전히 제거될 때까지 대기 (약 10초)
+sleep 10
+
+# 3. 재배포 (서비스 접미사 지정)
+bash deploy.sh prod
+```
+
+### 4.4.5 여러 환경 동시 운영
+
+```bash
+# 운영 환경 배포
+bash deploy.sh prod
+
+# 개발 환경 배포 (동시 운영 가능)
+bash deploy.sh dev
+
+# 테스트 환경 배포 (동시 운영 가능)
+bash deploy.sh test
+
+# 모든 환경 확인
+docker stack ls
+```
+
+**예상 출력**
+```
+NAME                    SERVICES
+kim5257_msg_log_prod    2
+kim5257_msg_log_dev     2
+kim5257_msg_log_test    2
+```
+
+### 4.5 Frontend 애플리케이션 배포
 
 Frontend는 **개발 환경에서 빌드 후 SFTP로 업로드**하는 방식을 사용합니다.
 
-#### 4.4.1 로컬 환경에서 빌드
+#### 4.5.1 로컬 환경에서 빌드
 
 ```bash
 # 개발 PC에서 실행
@@ -443,17 +715,35 @@ pnpm build
 - `index.html`, JavaScript/CSS 번들
 - 이미지 및 asset 파일
 
-#### 4.4.2 서버로 파일 업로드
+#### 4.5.2 서버로 파일 업로드
+
+배포할 디렉토리 경로는 **서비스 접미사**에 따라 달라집니다:
+
+```
+# 운영 환경 (prod)
+/home/$USER/nfs/kim5257-msg-log-prod-nginx/htdocs/
+
+# 개발 환경 (dev)
+/home/$USER/nfs/kim5257-msg-log-dev-nginx/htdocs/
+
+# 테스트 환경 (test)
+/home/$USER/nfs/kim5257-msg-log-test-nginx/htdocs/
+```
 
 **방법 1: rsync 사용 (권장)**
 ```bash
 # 개발 PC에서 실행
 cd frontend
 
-# rsync로 변경된 파일만 동기화
+# 운영 환경 (prod)으로 배포
 rsync -avz --delete \
   dist/ \
   user@server-ip:/home/user/nfs/kim5257-msg-log-prod-nginx/htdocs/
+
+# 개발 환경 (dev)으로 배포
+rsync -avz --delete \
+  dist/ \
+  user@server-ip:/home/user/nfs/kim5257-msg-log-dev-nginx/htdocs/
 
 # 옵션 설명:
 # -a: 아카이브 모드 (권한 유지)
@@ -467,7 +757,9 @@ rsync -avz --delete \
    - 호스트: 서버 IP
    - 포트: 22
    - 사용자: 서버 계정
-2. 원격 디렉토리로 이동: `/home/$USER/nfs/kim5257-msg-log-prod-nginx/htdocs/`
+2. 원격 디렉토리로 이동
+   - 운영: `/home/$USER/nfs/kim5257-msg-log-prod-nginx/htdocs/`
+   - 개발: `/home/$USER/nfs/kim5257-msg-log-dev-nginx/htdocs/`
 3. 로컬 `dist/` 내용을 원격 `htdocs/`로 업로드
 
 **방법 3: SCP + 압축**
@@ -478,7 +770,7 @@ cd frontend
 # 압축
 tar -czf dist.tar.gz dist/
 
-# 서버로 전송
+# 서버로 전송 (운영 환경 예시)
 scp dist.tar.gz user@server-ip:/tmp/
 
 # 서버에서 압축 해제 및 배포
@@ -491,12 +783,15 @@ rm -rf dist dist.tar.gz
 EOF
 ```
 
-#### 4.4.3 배포 확인
+#### 4.5.3 배포 확인
 
 ```bash
 # 서버에서 실행
-# 파일 존재 확인
+# 운영 환경 파일 확인
 ls -la /home/$USER/nfs/kim5257-msg-log-prod-nginx/htdocs/
+
+# 개발 환경 파일 확인
+ls -la /home/$USER/nfs/kim5257-msg-log-dev-nginx/htdocs/
 
 # 필수 파일 체크
 # - index.html
@@ -709,7 +1004,81 @@ EXIT;
 nano /path/to/kim5257-db/db.env
 ```
 
-### 5.5 정기 점검 체크리스트
+### 5.6 Backend API 모니터링 및 관리
+
+#### API 서비스 상태 확인
+
+```bash
+# 실행 중인 API 컨테이너 확인 (서비스 접미사 지정)
+docker ps -f name=kim5257_msg_log_prod_api
+
+# 서비스 상세 정보
+docker service inspect kim5257_msg_log_prod_api --pretty
+
+# 각 replica 상태 확인
+docker service ps kim5257_msg_log_prod_api
+
+# 실시간 로그 모니터링
+docker service logs -f kim5257_msg_log_prod_api --tail 100
+
+# 특정 시간대 로그 확인
+docker service logs kim5257_msg_log_prod_api --since 30m
+
+# 에러 로그만 필터링
+docker service logs kim5257_msg_log_prod_api 2>&1 | grep -i error
+```
+
+#### PM2 모니터링
+
+```bash
+# PM2 프로세스 목록 확인
+docker exec $(docker ps -q -f name=kim5257_msg_log_prod_api) pm2 list
+
+# PM2 실시간 모니터링
+docker exec -it $(docker ps -q -f name=kim5257_msg_log_prod_api) pm2 monit
+
+# PM2 로그 확인
+docker exec $(docker ps -q -f name=kim5257_msg_log_prod_api) pm2 logs
+
+# PM2 프로세스 정보
+docker exec $(docker ps -q -f name=kim5257_msg_log_prod_api) pm2 info app
+```
+
+#### API 성능 모니터링
+
+```bash
+# 리소스 사용량 실시간 확인
+docker stats $(docker ps -q -f name=kim5257_msg_log_prod_api)
+
+# 헬스체크 상태 확인
+docker inspect $(docker ps -q -f name=kim5257_msg_log_prod_api) | grep -A 10 Health
+
+# API 응답 시간 측정
+curl -w "\nResponse Time: %{time_total}s\n" -o /dev/null -s http://localhost:4000/health
+
+# API 부하 테스트 (Apache Bench)
+ab -n 1000 -c 10 http://localhost:4000/api/status
+```
+
+#### 로그 파일 관리
+
+```bash
+# 로그 디렉토리 용량 확인 (서비스 접미사 지정)
+du -sh /home/$USER/nfs/kim5257-msg-log-prod-api/logs/
+
+# 오래된 로그 파일 확인
+find /home/$USER/nfs/kim5257-msg-log-prod-api/logs/ -name "*.log" -mtime +30 -ls
+
+# 오래된 로그 파일 삭제
+find /home/$USER/nfs/kim5257-msg-log-prod-api/logs/ -name "*.log" -mtime +30 -delete
+
+# 로그 파일 압축 보관
+cd /home/$USER/nfs/kim5257-msg-log-prod-api/logs/
+tar -czf logs_backup_$(date +%Y%m%d).tar.gz *.log
+rm *.log
+```
+
+> **참고**: PM2 logrotate 모듈이 자동으로 로그 로테이션을 처리합니다.
 
 #### 일간 점검
 - [ ] 모든 서비스 정상 실행 확인
@@ -1145,7 +1514,213 @@ location /api {
 docker exec $(docker ps -q -f name=nginx) nginx -s reload
 ```
 
-### 6.8 일반적인 점검 절차
+### 6.9 Backend API 관련 문제
+
+#### 문제: API 서버가 시작되지 않음
+
+**증상**
+```
+kim5257_msg_log_prod_api.1    Starting    "task: non-zero exit (1)"
+```
+
+**진단 및 해결**
+```bash
+# 1. 서비스 로그 확인 (서비스 접미사 지정)
+docker service logs kim5257_msg_log_prod_api --tail 100
+
+# 2. 환경변수 확인
+docker service inspect kim5257_msg_log_prod_api --pretty
+
+# 3. 설정 파일 확인
+cat /home/$USER/nfs/kim5257-msg-log-prod-api/config/config.json
+
+# 4. 데이터베이스 연결 확인
+docker exec $(docker ps -q -f name=kim5257_msg_log_prod_api) node -e "
+const mariadb = require('mariadb');
+const pool = mariadb.createPool({
+  host: 'mariadb',
+  user: 'msglog_user',
+  password: 'password',
+  database: 'msglog_prod'
+});
+pool.getConnection().then(conn => {
+  console.log('DB Connected');
+  conn.release();
+  process.exit(0);
+}).catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"
+
+# 5. Redis 연결 확인
+docker exec $(docker ps -q -f name=kim5257_msg_log_prod_api) node -e "
+const redis = require('redis');
+const client = redis.createClient({url: 'redis://redis:6379'});
+client.connect().then(() => {
+  console.log('Redis Connected');
+  process.exit(0);
+}).catch(err => {
+  console.error(err);
+  process.exit(1);
+});
+"
+
+# 6. 컨테이너 직접 실행 테스트 (디버깅)
+docker run --rm -it \
+  --network kim5257_gateway_backbone \
+  -v /home/$USER/nfs/kim5257-msg-log-prod-api/config:/app/src/config:ro \
+  kim5257app/kim5257-msg-log-api:latest \
+  /bin/sh
+
+# 컨테이너 내부에서
+pm2 start ecosystem.config.js --no-daemon
+```
+
+**일반적인 원인**
+1. config.json 파일 누락 또는 오류
+2. 데이터베이스 연결 실패
+3. Redis 연결 실패
+4. 포트 충돌
+5. 코드 오류
+
+#### 문제: API 응답 속도 느림
+
+**진단**
+```bash
+# 1. API 응답 시간 측정
+time curl -w "\nTime: %{time_total}s\n" https://api.example.com/api/status
+
+# 2. 서비스 리소스 사용량 확인 (서비스 접미사 지정)
+docker stats $(docker ps -q -f name=kim5257_msg_log_prod_api)
+
+# 3. 데이터베이스 슬로우 쿼리 확인
+docker exec $(docker ps -q -f name=mariadb) \
+  mysql -u root -p -e "SELECT * FROM mysql.slow_log ORDER BY start_time DESC LIMIT 10;"
+
+# 4. Redis 성능 확인
+docker exec $(docker ps -q -f name=redis) redis-cli --latency
+
+# 5. 애플리케이션 로그에서 느린 요청 찾기
+docker service logs kim5257_msg_log_prod_api | grep -i "slow\|timeout"
+```
+
+**최적화**
+```bash
+# 1. 서비스 스케일 업
+docker service scale kim5257_msg_log_prod_api=4
+
+# 2. 리소스 제한 증가
+docker service update \
+  --limit-cpu 2.0 \
+  --limit-memory 1024M \
+  kim5257_msg_log_prod_api
+
+# 3. PM2 클러스터 모드 확인
+# ecosystem.config.js에서 instances 설정 확인
+```) redis-cli --latency
+
+# 5. 애플리케이션 로그에서 느린 요청 찾기
+docker service logs msglog_api_msglog_api | grep -i "slow\|timeout"
+```
+
+**최적화**
+```bash
+# 1. 서비스 스케일 업
+docker service scale msglog_api_msglog_api=4
+
+# 2. 리소스 제한 증가
+docker service update \
+  --limit-cpu 2.0 \
+  --limit-memory 1024M \
+  msglog_api_msglog_api
+
+# 3. 연결 풀 설정 확인 (코드 레벨)
+# - 데이터베이스 커넥션 풀 크기 조정
+# - Redis 연결 풀 설정
+```
+
+#### 문제: 이미지 빌드 실패
+
+**증상**
+```
+ERROR: failed to solve: process "/bin/sh -c npm ci" did not complete successfully
+```
+
+**해결방법**
+```bash
+# 1. 캐시 없이 빌드
+docker build --no-cache -t msglog-api:latest .
+
+# 2. BuildKit 사용
+DOCKER_BUILDKIT=1 docker build -t msglog-api:latest .
+
+# 3. 네트워크 문제 확인
+docker build --network=host -t msglog-api:latest .
+
+# 4. package-lock.json 재생성
+rm package-lock.json
+npm install
+docker build -t msglog-api:latest .
+
+# 5. .dockerignore 확인
+cat .dockerignore
+# node_modules, .git, .env 등이 포함되어 있는지 확인
+```
+
+#### 문제: 업데이트 후 서비스 장애
+
+**즉시 롤백**
+```bash
+# 빠른 롤백
+docker service rollback msglog_api_msglog_api
+
+# 상태 확인
+docker service ps msglog_api_msglog_api
+```
+
+**근본 원인 분석**
+```bash
+# 1. 업데이트 이력 확인
+docker service ps msglog_api_msglog_api --no-trunc
+
+# 2. 실패한 컨테이너 로그 확인
+docker logs <failed_container_id>
+
+# 3. 이전 이미지로 수동 롤백
+docker service update --image msglog-api:v1.0.0 msglog_api_msglog_api
+```
+
+#### 문제: 메모리 누수
+
+**증상**
+- 시간이 지남에 따라 메모리 사용량 증가
+- OOM (Out Of Memory) 에러 발생
+
+**진단**
+```bash
+# 1. 메모리 사용량 모니터링
+docker stats $(docker ps -q -f name=msglog_api)
+
+# 2. 컨테이너 재시작 이력 확인
+docker service ps msglog_api_msglog_api
+
+# 3. Node.js 힙 사용량 확인 (애플리케이션 레벨)
+# 애플리케이션에 메모리 프로파일링 엔드포인트 추가 필요
+```
+
+**임시 해결**
+```bash
+# 정기적인 재시작 (임시방편)
+# Cron으로 매일 새벽 재시작
+0 3 * * * docker service update --force msglog_api_msglog_api
+```
+
+**근본 해결**
+- 코드 레벨에서 메모리 누수 원인 찾기
+- 이벤트 리스너 정리
+- 데이터베이스 연결 해제 확인
+- 캐시 정리 로직 추가
 
 #### 전체 시스템 헬스체크
 
@@ -1430,3 +2005,209 @@ server {
     }
 }
 ```
+
+#### MariaDB 설정 예시
+
+```ini
+# /home/$USER/nfs/kim5257-db-mariadb/config/my.cnf
+
+[mysqld]
+# Character Set
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+
+# Connection
+max_connections = 500
+max_connect_errors = 1000000
+
+# Query Cache (MariaDB 10.x)
+query_cache_type = 1
+query_cache_size = 64M
+query_cache_limit = 2M
+
+# Logging
+slow_query_log = 1
+slow_query_log_file = /var/log/mysql/mysql-slow.log
+long_query_time = 1
+
+# InnoDB
+innodb_buffer_pool_size = 1G
+innodb_log_file_size = 256M
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method = O_DIRECT
+
+# Binary Log
+log_bin = /var/log/mysql/mysql-bin.log
+expire_logs_days = 7
+max_binlog_size = 100M
+
+# Event Scheduler
+event_scheduler = ON
+```
+
+### 7.6 자주 사용하는 SQL 쿼리
+
+#### 사용자 관리
+
+```sql
+-- 새 사용자 생성
+CREATE USER 'newuser'@'%' IDENTIFIED BY 'password';
+
+-- 권한 부여
+GRANT ALL PRIVILEGES ON msglog.* TO 'newuser'@'%';
+FLUSH PRIVILEGES;
+
+-- 사용자 목록 확인
+SELECT user, host FROM mysql.user;
+
+-- 사용자 권한 확인
+SHOW GRANTS FOR 'msglog_user'@'%';
+
+-- 사용자 삭제
+DROP USER 'olduser'@'%';
+```
+
+#### 데이터베이스 관리
+
+```sql
+-- 데이터베이스 생성
+CREATE DATABASE msglog CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- 데이터베이스 목록
+SHOW DATABASES;
+
+-- 테이블 목록
+USE msglog;
+SHOW TABLES;
+
+-- 테이블 구조 확인
+DESCRIBE table_name;
+SHOW CREATE TABLE table_name;
+
+-- 데이터베이스 크기 확인
+SELECT 
+    table_schema AS 'Database',
+    ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS 'Size (MB)'
+FROM information_schema.tables
+GROUP BY table_schema;
+
+-- 테이블별 크기 확인
+SELECT 
+    table_name AS 'Table',
+    ROUND(((data_length + index_length) / 1024 / 1024), 2) AS 'Size (MB)'
+FROM information_schema.tables
+WHERE table_schema = 'msglog'
+ORDER BY (data_length + index_length) DESC;
+```
+
+#### 성능 분석
+
+```sql
+-- 실행 중인 쿼리 확인
+SHOW PROCESSLIST;
+
+-- 슬로우 쿼리 확인
+SELECT * FROM mysql.slow_log ORDER BY start_time DESC LIMIT 10;
+
+-- 인덱스 사용 확인
+SHOW INDEX FROM table_name;
+
+-- 쿼리 실행 계획
+EXPLAIN SELECT * FROM table_name WHERE condition;
+
+-- 캐시 상태 확인
+SHOW STATUS LIKE 'Qcache%';
+```
+
+### 7.7 보안 강화 체크리스트
+
+#### 시스템 보안
+
+- [ ] SSH 포트 변경 (기본 22 → 다른 포트)
+- [ ] SSH 키 기반 인증 활성화
+- [ ] 비밀번호 로그인 비활성화
+- [ ] Root 로그인 비활성화
+- [ ] Fail2ban 설치 및 설정
+- [ ] UFW 방화벽 활성화
+- [ ] 정기적인 시스템 업데이트
+
+#### Docker 보안
+
+- [ ] Docker 소켓 권한 제한
+- [ ] 컨테이너 리소스 제한 (CPU, Memory)
+- [ ] 읽기 전용 루트 파일시스템 사용 (가능한 경우)
+- [ ] 최소 권한 원칙 적용
+- [ ] Docker Secrets 사용 (민감 정보)
+
+#### 애플리케이션 보안
+
+- [ ] 강력한 비밀번호 정책
+- [ ] 정기적인 비밀번호 변경
+- [ ] TLS 1.2 이상 사용
+- [ ] HTTPS 강제 리다이렉션
+- [ ] 보안 헤더 설정 (HSTS, CSP 등)
+- [ ] Rate Limiting 설정
+- [ ] SQL Injection 방어
+- [ ] XSS 방어
+
+#### 데이터 보안
+
+- [ ] 정기적인 백업 수행
+- [ ] 백업 암호화
+- [ ] 백업 복구 테스트
+- [ ] 데이터베이스 암호화 (TDE)
+- [ ] 로그 접근 제어
+- [ ] 민감 정보 마스킹
+
+---
+
+## 8. 참고 자료
+
+### 8.1 공식 문서
+
+- **Docker**: https://docs.docker.com/
+- **Docker Swarm**: https://docs.docker.com/engine/swarm/
+- **Nginx**: https://nginx.org/en/docs/
+- **MariaDB**: https://mariadb.com/kb/en/documentation/
+- **Redis**: https://redis.io/documentation
+- **Let's Encrypt**: https://letsencrypt.org/docs/
+- **Certbot**: https://certbot.eff.org/docs/
+
+### 8.2 커뮤니티 및 지원
+
+- **Docker Community**: https://forums.docker.com/
+- **Stack Overflow**: https://stackoverflow.com/
+- **GitHub Issues**: 각 프로젝트의 이슈 트래커
+
+### 8.3 관련 도구
+
+- **Portainer**: Docker 웹 UI 관리 도구
+- **Watchtower**: 컨테이너 자동 업데이트
+- **cAdvisor**: 컨테이너 모니터링
+- **Prometheus + Grafana**: 시스템 모니터링
+- **ELK Stack**: 로그 수집 및 분석
+
+---
+
+## 9. 변경 이력
+
+| 버전 | 날짜 | 작성자 | 변경 내용 |
+|-----|------|--------|----------|
+| 1.0 | 2024-01-01 | - | 초기 문서 작성 |
+
+---
+
+## 10. 라이선스 및 면책
+
+이 문서는 MSGLOG 서비스의 운영 및 유지보수를 위한 참고 자료입니다.
+
+**면책 조항**
+- 본 문서의 내용을 따라 발생하는 모든 결과에 대해 작성자는 책임을 지지 않습니다.
+- 프로덕션 환경에 적용하기 전에 테스트 환경에서 충분히 검증하시기 바랍니다.
+- 보안 설정은 각 환경에 맞게 조정이 필요합니다.
+
+---
+
+**문서 끝**
+
+궁금한 사항이 있거나 추가 지원이 필요하시면 시스템 관리자에게 문의하시기 바랍니다.
